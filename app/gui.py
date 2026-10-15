@@ -89,6 +89,10 @@ class MainWindow(QMainWindow):
 
         self.region_status = QLabel("就绪")
         grid.addWidget(self.region_status, 1, 2, 1, 2)
+
+        grid.addWidget(QLabel("URL 模板(收集):"), 2, 0)
+        self.collect_template_combo = self._build_template_combo("collect")
+        grid.addWidget(self.collect_template_combo, 2, 1, 1, 3)
         layout.addWidget(date_box)
 
         index_box = QGroupBox("GY1 索引信息")
@@ -151,14 +155,8 @@ class MainWindow(QMainWindow):
         self.targets_edit.setFixedHeight(90)
         form.addRow("天区列表:", self.targets_edit)
 
-        self.template_combo = QComboBox()
-        for key, label in self.config.get_url_template_options().items():
-            self.template_combo.addItem(label, key)
-        current_idx = self.template_combo.findData(self.config.get_template_type())
-        if current_idx >= 0:
-            self.template_combo.setCurrentIndex(current_idx)
-        self.template_combo.currentIndexChanged.connect(self._on_template_type_changed)
-        form.addRow("URL 模板:", self.template_combo)
+        self.download_template_combo = self._build_template_combo("download")
+        form.addRow("URL 模板(下载):", self.download_template_combo)
 
         self.workspace_edit = QLineEdit(DEFAULT_WORKSPACE)
         ws_btn = QPushButton("浏览...")
@@ -235,12 +233,23 @@ class MainWindow(QMainWindow):
         if path:
             self.workspace_edit.setText(path)
 
-    def _on_template_type_changed(self, _index: int) -> None:
-        key = self.template_combo.currentData()
+    def _build_template_combo(self, scope: str) -> QComboBox:
+        combo = QComboBox()
+        for key, label in self.config.get_url_template_options().items():
+            combo.addItem(label, key)
+        idx = combo.findData(self.config.get_template_type(scope))
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        combo.currentIndexChanged.connect(lambda _i, s=scope: self._on_template_type_changed(s))
+        return combo
+
+    def _on_template_type_changed(self, scope: str) -> None:
+        combo = self.collect_template_combo if scope == "collect" else self.download_template_combo
+        key = combo.currentData()
         if not key:
             return
-        self.config.set_template_type(key)
-        self._log(f"[URL模板] 已切换为 {key}: {self.config.get_url_template()}")
+        self.config.set_template_type(key, scope)
+        self._log(f"[URL模板-{scope}] 已切换为 {key}: {self.config.get_url_template(scope)}")
 
     # ---------------- gui config ----------------
     def _apply_gui_config(self) -> None:

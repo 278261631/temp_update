@@ -48,17 +48,19 @@ class AppConfig:
     def get_base_url(self) -> str:
         return self.config.get("base_urls", {}).get("primary", "")
 
-    def get_template_type(self) -> str:
-        return self.config.get("url_template_type", "standard")
+    def get_template_type(self, scope: str = "download") -> str:
+        """scope: 'collect'（天区收集）或 'download'（下载观测文件）。"""
+        return self.config.get(f"{scope}_url_template_type") or \
+            self.config.get("url_template_type", "standard")
 
-    def set_template_type(self, template_type: str) -> None:
+    def set_template_type(self, template_type: str, scope: str = "download") -> None:
         if template_type in self.config.get("url_templates", {}):
-            self.config["url_template_type"] = template_type
+            self.config[f"{scope}_url_template_type"] = template_type
             self.save()
 
-    def get_url_template(self) -> str:
+    def get_url_template(self, scope: str = "download") -> str:
         templates = self.config.get("url_templates", {})
-        template = templates.get(self.get_template_type(), "")
+        template = templates.get(self.get_template_type(scope), "")
         return template.replace("{base_url}", self.get_base_url())
 
     def get_url_template_options(self) -> Dict[str, str]:
@@ -67,15 +69,15 @@ class AppConfig:
             "with_year": "包含年份 (/{year}/{date}/)",
         }
 
-    def _format_params(self, tel_name: str, date: str, k_number: str = "") -> Dict[str, str]:
+    def _format_params(self, tel_name: str, date: str, k_number: str = "",
+                       scope: str = "download") -> Dict[str, str]:
         params = {
             "base_url": self.get_base_url(),
             "tel_name": tel_name,
             "date": date,
             "k_number": k_number,
         }
-        templates = self.config.get("url_templates", {})
-        template = templates.get(self.get_template_type(), "")
+        template = self.get_url_template(scope)
         if "{year_of_date}" in template:
             try:
                 params["year_of_date"] = date[:4] if len(date) >= 4 else datetime.now().strftime("%Y")
@@ -83,14 +85,15 @@ class AppConfig:
                 params["year_of_date"] = datetime.now().strftime("%Y")
         return params
 
-    def build_url(self, tel_name: str, date: str, k_number: str = "") -> str:
-        template = self.get_url_template()
-        return template.format(**self._format_params(tel_name, date, k_number))
+    def build_url(self, tel_name: str, date: str, k_number: str = "",
+                  scope: str = "download") -> str:
+        template = self.get_url_template(scope)
+        return template.format(**self._format_params(tel_name, date, k_number, scope))
 
-    def build_base_url(self, tel_name: str, date: str) -> str:
+    def build_base_url(self, tel_name: str, date: str, scope: str = "collect") -> str:
         """构建不包含天区编号的基础 URL（用于扫描可用天区）。"""
-        template = self.get_url_template()
-        full_url = template.format(**self._format_params(tel_name, date, ""))
+        template = self.get_url_template(scope)
+        full_url = template.format(**self._format_params(tel_name, date, "", scope))
         return full_url.rstrip("/")
 
     # ----- 天区坐标 -----

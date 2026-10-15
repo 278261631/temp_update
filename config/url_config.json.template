@@ -9,6 +9,8 @@
     "recent_data": "{base_url}/{tel_name}-DATA/{date}/"
   },
   "url_template_type": "standard",
+  "collect_url_template_type": "standard",
+  "download_url_template_type": "standard",
   "path_settings": {
     "temp_download_path": ""
   },
