@@ -1,0 +1,18 @@
+{
+  "_note": "使用前请将本文件复制为同目录下的 url_config.json 并填写真实配置。url_config.json 已被 .gitignore 忽略，请勿提交到版本库，以免泄露数据源地址、天区坐标表以及本地路径等敏感信息。",
+  "base_urls": {
+    "primary": "https://your-data-host.example.org/CHANGE_ME"
+  },
+  "url_templates": {
+    "standard": "{base_url}/{tel_name}-DATA/{date}/{k_number}/",
+    "with_year": "{base_url}/{tel_name}-DATA/{year_of_date}/{date}/{k_number}/",
+    "recent_data": "{base_url}/{tel_name}-DATA/{date}/"
+  },
+  "url_template_type": "standard",
+  "path_settings": {
+    "temp_download_path": ""
+  },
+  "regionData": {},
+  "astap_exe": "astap",
+  "astap_cmd_template": "{astap_exe} -ra {astap_ra} -spd {astap_spd} -s 1000 -z 1 -fov 2 -D d50 -r 180 -update -f {fits_file_path}"
+}

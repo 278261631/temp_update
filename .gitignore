@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- 本项目：避免提交敏感信息与运行时数据 ---
+config/url_config.json
+config/gui_config.json
+gui_config.json
+data/
+templates_update/
+*.log
