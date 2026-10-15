@@ -47,11 +47,13 @@ def format_bytes(num) -> str:
 class UpdateSettings:
     recent_days: int = 3
     min_images: int = 30
-    reproject_threads: int = 10
     preprocess_threads: int = 20
     lm_thres: float = 15.0
     ell_thres: float = 0.2
     fwhm_thres: float = 10.0
+    swarp_exe: str = ""  # swarp.exe 路径（留空则自动探测）
+    swarp_threads: int = 0  # SWarp 线程数（0=自动）
+    swarp_resampling: str = "BILINEAR"  # SWarp 重采样核
 
 
 def collect_regions(config: AppConfig, start: str, end: str,
@@ -372,36 +374,67 @@ class TemplateEngine:
             executor.map(_process, fits_files)
         self.status(f"预处理完成：共处理 {total} 个文件，坏图像 {counters['bad']} 个。", "green")
 
-    # ---------- 生成模板 ----------
-    def _write_template(self, hdu_list, used_files, field_name: str) -> bool:
+    # ---------- 生成模板（SWarp 后端）----------
+    def _coadd_swarp(self, input_files, field_name: str):
         import numpy as np
         from astropy.io import fits
-        from reproject.mosaicking import find_optimal_celestial_wcs, reproject_and_coadd
-        import reproject
+        from .swarp_backend import SwarpBackend, resolve_swarp_exe
 
-        start_time = time.time()
-        wcs, shape_out = find_optimal_celestial_wcs(hdu_list)
-
-        hdu_list2 = []
-        for fpath in used_files:
-            try:
-                hdu_list2.append(fits.open(fpath)[0])
-            except Exception as e:
-                self.log(f"[生成] 重投影时打开文件失败 {fpath}: {e}")
-        if not hdu_list2:
-            return False
-
-        comb, footprint = reproject_and_coadd(
-            hdu_list2, wcs, shape_out=shape_out,
-            reproject_function=reproject.reproject_interp,
-            combine_function="mean", match_background=True,
-            parallel=max(1, self.settings.reproject_threads),
-        )
-        data = np.where(footprint == len(hdu_list2), comb, np.nan).astype("float32")
+        exe = resolve_swarp_exe(self.settings.swarp_exe)
+        if not exe:
+            self.log("[生成] 未找到 swarp.exe（可在界面指定或设置环境变量 SWARP_EXE）。")
+            return None, None
+        backend = SwarpBackend(exe)
+        if not backend.available():
+            self.log(f"[生成] swarp 不可用: {exe}")
+            return None, None
 
         out_dir = Path(self.output_root)
         out_dir.mkdir(parents=True, exist_ok=True)
-        fits.writeto(out_dir / f"{field_name}_no_trim.fits", data, wcs.to_header(), overwrite=True)
+        coadd_path = str(out_dir / f"_swarp_{field_name}.fits")
+        weight_path = coadd_path.replace(".fits", ".weight.fits")
+
+        ok, msg = backend.coadd(
+            input_files, coadd_path,
+            combine_type="AVERAGE", resampling=self.settings.swarp_resampling,
+            threads=self.settings.swarp_threads,
+        )
+        if not ok:
+            self.log(f"[生成] swarp 失败: {msg}")
+            return None, None
+
+        with fits.open(coadd_path) as h:
+            data = h[0].data.astype("float32")
+            header = h[0].header.copy()
+        weight = None
+        if os.path.exists(weight_path):
+            try:
+                with fits.open(weight_path) as w:
+                    weight = w[0].data
+            except Exception:
+                weight = None
+        if weight is not None:
+            data = np.where(weight > 0, data, np.nan).astype("float32")
+        for p in (coadd_path, weight_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        return data, header
+
+    def _write_template(self, field_name: str, input_files) -> bool:
+        import numpy as np
+        from astropy.io import fits
+
+        start_time = time.time()
+        self.status(f"模板生成: {field_name} - 使用 SWarp 合成...", "blue")
+        data, header = self._coadd_swarp(input_files, field_name)
+        if data is None:
+            return False
+
+        out_dir = Path(self.output_root)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fits.writeto(out_dir / f"{field_name}_no_trim.fits", data, header, overwrite=True)
 
         mask = np.isfinite(data)
         if not mask.any():
@@ -413,14 +446,15 @@ class TemplateEngine:
         x_min, x_max = int(xs.min()), int(xs.max())
         trimmed = data[y_min:y_max + 1, x_min:x_max + 1].astype("float32")
 
-        header = wcs.to_header()
+        header = header.copy()
         if "CRPIX1" in header:
             header["CRPIX1"] -= x_min
         if "CRPIX2" in header:
             header["CRPIX2"] -= y_min
         fits.writeto(out_dir / f"{field_name}.fits", trimmed, header, overwrite=True)
 
-        self.log(f"[生成] 完成 {field_name} -> {out_dir / (field_name + '.fits')}，用时 {time.time() - start_time:.1f} 秒")
+        self.log(f"[生成] 完成 {field_name} (swarp) -> {out_dir / (field_name + '.fits')}，"
+                 f"用时 {time.time() - start_time:.1f} 秒")
         return True
 
     def make_templates(self) -> None:
@@ -477,25 +511,24 @@ class TemplateEngine:
                 continue
 
             self.status(f"模板生成: ({idx}/{total_templates}) {k_full} - 使用 {len(fits_files)} 个文件合成...", "blue")
-            hdu_list, used_files = [], []
+            used_files = []
             for fpath in fits_files:
                 try:
-                    hdu = fits.open(fpath)[0]
-                    if not WCS(hdu.header).has_celestial:
-                        self.log(f"[模板生成] 文件缺少天球WCS，跳过: {fpath}")
-                        continue
-                    hdu_list.append(hdu)
+                    with fits.open(fpath, memmap=True) as hdul:
+                        if not WCS(hdul[0].header).has_celestial:
+                            self.log(f"[模板生成] 文件缺少天球WCS，跳过: {fpath}")
+                            continue
                     used_files.append(fpath)
                 except Exception as e:
                     self.log(f"[模板生成] 打开文件失败 {fpath}: {e}")
-            if not hdu_list:
+            if not used_files:
                 continue
-            if len(hdu_list) < max(1, self.settings.min_images):
-                self.log(f"[模板生成] {k_full} 可用图像数 {len(hdu_list)} 小于最少参与图像数 {self.settings.min_images}，跳过。")
+            if len(used_files) < max(1, self.settings.min_images):
+                self.log(f"[模板生成] {k_full} 可用图像数 {len(used_files)} 小于最少参与图像数 {self.settings.min_images}，跳过。")
                 continue
 
             try:
-                if self._write_template(hdu_list, used_files, field_name):
+                if self._write_template(field_name, used_files):
                     made += 1
                     self.status(f"模板生成: ({idx}/{total_templates}) {k_full} -> {field_name}.fits", "green")
             except Exception as e:

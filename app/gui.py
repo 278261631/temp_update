@@ -135,11 +135,11 @@ class MainWindow(QMainWindow):
         self.min_images.setValue(30)
         grid.addWidget(self.min_images, 1, 1)
 
-        grid.addWidget(QLabel("重投影线程数:"), 2, 0)
-        self.reproject_threads = QSpinBox()
-        self.reproject_threads.setRange(1, 64)
-        self.reproject_threads.setValue(10)
-        grid.addWidget(self.reproject_threads, 2, 1)
+        grid.addWidget(QLabel("SWarp 线程数(0=自动):"), 2, 0)
+        self.swarp_threads = QSpinBox()
+        self.swarp_threads.setRange(0, 64)
+        self.swarp_threads.setValue(0)
+        grid.addWidget(self.swarp_threads, 2, 1)
 
         grid.addWidget(QLabel("预处理线程数:"), 3, 0)
         self.preprocess_threads = QSpinBox()
@@ -157,6 +157,17 @@ class MainWindow(QMainWindow):
 
         self.download_template_combo = self._build_template_combo("download")
         form.addRow("URL 模板(下载):", self.download_template_combo)
+
+        self.swarp_edit = QLineEdit()
+        self.swarp_edit.setPlaceholderText(r"swarp.exe 路径，例如 E:\github\swarp_win\build\src\swarp.exe")
+        swarp_btn = QPushButton("浏览...")
+        swarp_btn.clicked.connect(self._pick_swarp)
+        swarp_row = QHBoxLayout()
+        swarp_row.addWidget(self.swarp_edit, 1)
+        swarp_row.addWidget(swarp_btn)
+        swarp_widget = QWidget()
+        swarp_widget.setLayout(swarp_row)
+        form.addRow("swarp.exe:", swarp_widget)
 
         self.workspace_edit = QLineEdit(DEFAULT_WORKSPACE)
         ws_btn = QPushButton("浏览...")
@@ -233,6 +244,12 @@ class MainWindow(QMainWindow):
         if path:
             self.workspace_edit.setText(path)
 
+    def _pick_swarp(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择 swarp.exe", self.swarp_edit.text() or BASE_DIR,
+                                              "Executable (*.exe);;All (*)")
+        if path:
+            self.swarp_edit.setText(path)
+
     def _build_template_combo(self, scope: str) -> QComboBox:
         combo = QComboBox()
         for key, label in self.config.get_url_template_options().items():
@@ -262,8 +279,9 @@ class MainWindow(QMainWindow):
                 edit.setDate(date)
         self.recent_days.setValue(int(gc.get("recent_days") or 3))
         self.min_images.setValue(int(gc.get("min_images") or 30))
-        self.reproject_threads.setValue(int(gc.get("reproject_threads") or 10))
         self.preprocess_threads.setValue(int(gc.get("preprocess_threads") or 20))
+        self.swarp_threads.setValue(int(gc.get("swarp_threads") or 0))
+        self.swarp_edit.setText(str(gc.get("swarp_exe") or ""))
         self.workspace_edit.setText(str(gc.get("workspace") or DEFAULT_WORKSPACE))
         last_tab = int(gc.get("last_tab") or 0)
         if 0 <= last_tab < self.tabs.count():
@@ -277,8 +295,9 @@ class MainWindow(QMainWindow):
             end_date=self.end_date.date().toString("yyyyMMdd"),
             recent_days=self.recent_days.value(),
             min_images=self.min_images.value(),
-            reproject_threads=self.reproject_threads.value(),
             preprocess_threads=self.preprocess_threads.value(),
+            swarp_threads=self.swarp_threads.value(),
+            swarp_exe=self.swarp_edit.text().strip(),
             workspace=self.workspace_edit.text().strip(),
         )
 
@@ -325,8 +344,9 @@ class MainWindow(QMainWindow):
         return UpdateSettings(
             recent_days=self.recent_days.value(),
             min_images=self.min_images.value(),
-            reproject_threads=self.reproject_threads.value(),
             preprocess_threads=self.preprocess_threads.value(),
+            swarp_threads=self.swarp_threads.value(),
+            swarp_exe=self.swarp_edit.text().strip(),
         )
 
     def _start_template(self, action: str) -> None:
