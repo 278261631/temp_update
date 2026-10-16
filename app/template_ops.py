@@ -676,4 +676,96 @@ class TemplateEngine:
         else:
             self.status("模板生成完成：没有成功生成任何新模板。", "orange")
 
+    # ---------- 一键：边下载边预处理 -> 达标即生成 ----------
+    def auto_generate(self) -> None:
+        """对每个天区：按最近日期依次 下载→预处理，直到合格帧数达到 min_images
+        或日期用尽，然后用合格(裁切)帧直接生成模板。"""
+        system_name, selected = self._load_targets()
+        if system_name is None:
+            return
+        if not selected:
+            self.status("请输入要处理的天区列表（例如 GY6_K002-8,GY6_K002-9）。", "orange")
+            return
+        system_upper = system_name.upper()
+        for d in (self.update_root, self.output_root, self.cropped_root, self.bad_dir):
+            os.makedirs(d, exist_ok=True)
+
+        index = load_gy1_index()
+        if not index:
+            self.status("GY1索引为空，请先执行“天区收集”。", "red")
+            return
+        downloader = self._make_downloader()
+        min_images = max(1, int(self.settings.min_images or 1))
+        recent_days = max(1, int(self.settings.recent_days or 1))
+        total = len(selected)
+        made = 0
+
+        for idx, item in enumerate(selected, 1):
+            k_number = item.get("k_number")
+            suffix = item.get("suffix")
+            k_full = item.get("k_full")
+            if not (k_number and suffix and k_full):
+                continue
+            try:
+                field_name = f"K{int(str(k_number).lstrip('Kk')):03d}-{int(suffix)}"
+            except Exception:
+                continue
+
+            if (Path(self.output_root) / f"{field_name}.fits").exists() and not self.settings.overwrite_templates:
+                self.status(f"[{idx}/{total}] {k_full} 已存在，跳过（勾选“覆盖已存在模板”可重生成）。", "orange")
+                continue
+
+            dates = find_recent_dates_for_region(index, k_number, recent_days)
+            if not dates:
+                self.status(f"[{idx}/{total}] {k_full} 在索引中无日期，跳过。", "orange")
+                continue
+
+            self.status(f"[{idx}/{total}] {k_full} 开始：目标≥{min_images} 帧（最多 {recent_days} 天）", "blue")
+            qualified, stop = [], False
+            for date in dates:
+                if stop:
+                    break
+                region_url = self.config.build_url(system_upper, date, k_number)
+                fits_files = self._scan_region_url(region_url)
+                candidates = self._select_candidates(fits_files, k_full)
+                if not candidates:
+                    self.log(f"[自动] {k_full} {date}：无匹配文件")
+                    continue
+                for _fn, file_url, _size in candidates:
+                    if len(qualified) >= min_images:
+                        stop = True
+                        break
+                    result = downloader.download_single_file(file_url, self.update_root, self._progress_cb("自动下载"))
+                    local = os.path.join(self.update_root, downloader.get_filename_from_url(file_url))
+                    if not os.path.exists(local):
+                        self.log(f"[自动] {k_full} 下载失败: {result}")
+                        continue
+                    is_bad, reasons = self._quality_of(local)
+                    if is_bad:
+                        try:
+                            shutil.move(local, os.path.join(self.bad_dir, os.path.basename(local)))
+                        except Exception:
+                            pass
+                        self.log(f"[自动] {k_full} 剔除坏帧 {os.path.basename(local)} ({'; '.join(reasons)})")
+                        continue
+                    if self._save_cropped(local):
+                        qualified.append(os.path.join(self.cropped_root, os.path.basename(local)))
+                    self.status(f"[{idx}/{total}] {k_full} 合格 {len(qualified)}/{min_images}（{date}）", "green")
+
+            if not qualified:
+                self.status(f"[{idx}/{total}] {k_full} 没有合格帧，跳过。", "red")
+                continue
+            if len(qualified) < min_images:
+                self.log(f"[自动] {k_full} 日期用尽，合格 {len(qualified)}<{min_images}，仍生成。")
+
+            self.status(f"[{idx}/{total}] {k_full} 生成模板（{len(qualified)} 帧）...", "blue")
+            try:
+                if self._write_template(field_name, qualified):
+                    made += 1
+            except Exception as e:
+                self.log(f"[自动] {k_full} 生成失败: {e}")
+
+        self.status(f"一键完成：成功生成 {made}/{total} 个模板 -> {os.path.join(self.workspace_root, 'output')}",
+                    "green" if made else "orange")
+
 

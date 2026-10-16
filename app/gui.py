@@ -274,20 +274,16 @@ class MainWindow(QMainWindow):
         action_box = QGroupBox("操作")
         action_layout = QVBoxLayout(action_box)
         btn_row = QHBoxLayout()
-        self.btn_download = QPushButton("下载目标天区观测文件")
-        self.btn_download.clicked.connect(lambda: self._start_template("download"))
-        self.btn_preprocess = QPushButton("预处理图像")
-        self.btn_preprocess.clicked.connect(lambda: self._start_template("preprocess"))
-        self.btn_make = QPushButton("生成新模板")
-        self.btn_make.clicked.connect(lambda: self._start_template("make"))
-        for b in (self.btn_download, self.btn_preprocess, self.btn_make):
-            btn_row.addWidget(b)
+        self.btn_auto = QPushButton("一键生成（下载→预处理→达标→生成）")
+        self.btn_auto.clicked.connect(lambda: self._start_template("auto"))
+        btn_row.addWidget(self.btn_auto)
         action_layout.addLayout(btn_row)
 
         self.update_status = QLabel("就绪")
         action_layout.addWidget(self.update_status)
 
-        tip = QLabel("说明：填写天区列表（含系统名，如 GY6_K002-8），按 gy1_region_index.json 查找最近日期并下载相应观测文件。")
+        tip = QLabel("说明：填天区列表后点「一键生成」——按最近日期依次下载→预处理，"
+                     "合格帧数达到“最少参与图像数”或日期用尽即用合格帧生成模板。")
         tip.setStyleSheet("color: gray;")
         action_layout.addWidget(tip)
         layout.addWidget(action_box)
@@ -783,7 +779,7 @@ class MainWindow(QMainWindow):
         self._set_buttons_enabled(True)
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for b in (self.btn_download, self.btn_preprocess, self.btn_make, self.check_btn):
+        for b in (self.btn_auto, self.check_btn):
             b.setEnabled(enabled)
 
     def _on_template_finished(self) -> None:

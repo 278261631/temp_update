@@ -66,9 +66,9 @@ class CheckTemplatesWorker(_BaseWorker):
 
 
 class TemplateWorker(_BaseWorker):
-    """action ∈ {download, preprocess, make}"""
+    """action ∈ {auto, download, preprocess, make}"""
 
-    ACTIONS = {"download", "preprocess", "make"}
+    ACTIONS = {"auto", "download", "preprocess", "make"}
 
     def __init__(self, action: str, config: AppConfig, settings: UpdateSettings,
                  targets_text: str, workspace_root: str, parent=None):
@@ -88,7 +88,9 @@ class TemplateWorker(_BaseWorker):
             status=lambda t, c="black": self.status.emit(t, c),
         )
         try:
-            if self.action == "download":
+            if self.action == "auto":
+                engine.auto_generate()
+            elif self.action == "download":
                 engine.download_problem_templates()
             elif self.action == "preprocess":
                 engine.preprocess_images()
