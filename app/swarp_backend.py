@@ -5,46 +5,23 @@
 """
 
 import os
-import shutil
 import subprocess
 from typing import List, Optional, Tuple
 
-DEFAULT_MINGW_BIN = r"C:\msys64\mingw64\bin"
-
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 已知的 swarp.exe 位置（按顺序探测）
-KNOWN_SWARP_PATHS = (
-    os.path.join(_PROJECT_ROOT, "tools", "swarp", "swarp.exe"),
-    r"E:\github\swarp_win\build\src\swarp.exe",
-    r"C:\msys64\mingw64\bin\swarp.exe",
-    r"C:\swarp\swarp.exe",
-)
-
-
-def resolve_swarp_exe(configured: str = "") -> str:
-    """按优先级解析 swarp.exe：显式配置 > 环境变量 SWARP_EXE > PATH > 已知路径。"""
-    for cand in (configured, os.environ.get("SWARP_EXE")):
-        if cand and os.path.isfile(cand):
-            return cand
-    found = shutil.which("swarp") or shutil.which("swarp.exe")
-    if found:
-        return found
-    for cand in KNOWN_SWARP_PATHS:
-        if os.path.isfile(cand):
-            return cand
-    return configured or ""
+# 项目内置的 swarp 可执行文件（随仓库分发，同目录含 libwinpthread-1.dll）
+SWARP_EXE = os.path.join(_PROJECT_ROOT, "tools", "swarp", "swarp.exe")
 
 
 class SwarpBackend:
-    def __init__(self, exe: str, mingw_bin: Optional[str] = DEFAULT_MINGW_BIN, timeout: int = 3600):
-        self.exe = exe or ""
-        self.mingw_bin = mingw_bin
+    def __init__(self, exe: str = None, timeout: int = 3600):
+        self.exe = exe or SWARP_EXE
         self.timeout = timeout
         self.last_message = ""
 
     def available(self) -> bool:
-        return bool(self.exe) and os.path.isfile(self.exe)
+        return os.path.isfile(self.exe)
 
     def coadd(self, input_files: List[str], out_path: str,
               combine_type: str = "AVERAGE", resampling: str = "BILINEAR",
@@ -79,11 +56,8 @@ class SwarpBackend:
             "-VERBOSE_TYPE", "QUIET",
             "-NTHREADS", str(int(threads)),
         ]
-        env = os.environ.copy()
-        if self.mingw_bin:
-            env["PATH"] = self.mingw_bin + os.pathsep + env.get("PATH", "")
         try:
-            r = subprocess.run(args, cwd=workdir, env=env, capture_output=True,
+            r = subprocess.run(args, cwd=workdir, capture_output=True,
                                text=True, timeout=self.timeout)
         except subprocess.TimeoutExpired:
             return False, "swarp 超时"

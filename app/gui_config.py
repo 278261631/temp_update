@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, Dict
 
 from .config import BASE_DIR
-from .swarp_backend import resolve_swarp_exe
 
 GUI_CONFIG_PATH = os.path.join(BASE_DIR, "config", "gui_config.json")
 DEFAULT_TARGETS = "GY6_K002-8,GY6_K002-9"
@@ -28,7 +27,6 @@ class GuiConfig:
             "min_images": 30,
             "preprocess_threads": 20,
             "swarp_threads": 0,
-            "swarp_exe": resolve_swarp_exe(),
             "workspace": os.path.join(BASE_DIR, "templates_update"),
         }
         self.path = path or GUI_CONFIG_PATH

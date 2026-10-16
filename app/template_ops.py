@@ -51,7 +51,6 @@ class UpdateSettings:
     lm_thres: float = 15.0
     ell_thres: float = 0.2
     fwhm_thres: float = 10.0
-    swarp_exe: str = ""  # swarp.exe 路径（留空则自动探测）
     swarp_threads: int = 0  # SWarp 线程数（0=自动）
     swarp_resampling: str = "BILINEAR"  # SWarp 重采样核
 
@@ -378,15 +377,11 @@ class TemplateEngine:
     def _coadd_swarp(self, input_files, field_name: str):
         import numpy as np
         from astropy.io import fits
-        from .swarp_backend import SwarpBackend, resolve_swarp_exe
+        from .swarp_backend import SwarpBackend, SWARP_EXE
 
-        exe = resolve_swarp_exe(self.settings.swarp_exe)
-        if not exe:
-            self.log("[生成] 未找到 swarp.exe（可在界面指定或设置环境变量 SWARP_EXE）。")
-            return None, None
-        backend = SwarpBackend(exe)
+        backend = SwarpBackend()
         if not backend.available():
-            self.log(f"[生成] swarp 不可用: {exe}")
+            self.log(f"[生成] 项目内置 swarp 不可用: {SWARP_EXE}")
             return None, None
 
         out_dir = Path(self.output_root)
