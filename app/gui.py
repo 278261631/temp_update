@@ -2,22 +2,85 @@
 """PySide6 主界面：天区收集 + 升级模板。"""
 
 import os
+import re
+import subprocess
 from datetime import datetime
 
 from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDateEdit, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog,
+    QDoubleSpinBox, QFileDialog, QFormLayout, QGraphicsPixmapItem, QGraphicsScene,
+    QGraphicsView, QGridLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from .config import AppConfig, BASE_DIR
 from .gui_config import GuiConfig
 from .region_index import INDEX_PATH, load_gy1_index
 from .template_ops import UpdateSettings
-from .workers import RegionCollectWorker, TemplateWorker
+from .workers import CheckTemplatesWorker, RegionCollectWorker, TemplateWorker
+from .check_templates import is_template_file
 
 DEFAULT_WORKSPACE = os.path.join(BASE_DIR, "templates_update")
+
+
+class _ZoomView(QGraphicsView):
+    """支持鼠标拖拽平移、滚轮缩放的图像视图。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+
+    def wheelEvent(self, event):  # noqa: N802
+        factor = 1.25 if event.angleDelta().y() > 0 else 1.0 / 1.25
+        self.scale(factor, factor)
+
+
+class PreviewDialog(QDialog):
+    def __init__(self, pixmap: QPixmap, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(1000, 820)
+        layout = QVBoxLayout(self)
+
+        self.view = _ZoomView(self)
+        self.scene = QGraphicsScene(self)
+        self.item = QGraphicsPixmapItem(pixmap)
+        self.scene.addItem(self.item)
+        self.view.setScene(self.scene)
+        self.view.setBackgroundBrush(QColor("black"))
+        layout.addWidget(self.view, 1)
+
+        row = QHBoxLayout()
+        hint = QLabel("拖拽平移 · 滚轮缩放")
+        hint.setStyleSheet("color: gray;")
+        fit_btn = QPushButton("适应窗口")
+        fit_btn.clicked.connect(self._fit)
+        one_btn = QPushButton("1:1")
+        one_btn.clicked.connect(self._reset)
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(hint)
+        row.addStretch(1)
+        row.addWidget(fit_btn)
+        row.addWidget(one_btn)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self._fit()
+
+    def _fit(self):
+        self.view.fitInView(self.item, Qt.KeepAspectRatio)
+
+    def _reset(self):
+        self.view.resetTransform()
 
 
 class MainWindow(QMainWindow):
@@ -39,6 +102,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_region_tab(), "天区收集")
         self.tabs.addTab(self._build_update_tab(), "升级模板")
+        self.tabs.addTab(self._build_check_tab(), "检查模板")
         self.tabs.addTab(self._build_log_tab(), "日志")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs)
@@ -125,8 +189,9 @@ class MainWindow(QMainWindow):
 
         grid.addWidget(QLabel("每个天区最近日期数:"), 0, 0)
         self.recent_days = QSpinBox()
-        self.recent_days.setRange(1, 30)
+        self.recent_days.setRange(1, 1000)
         self.recent_days.setValue(3)
+        self.recent_days.setMinimumWidth(80)
         grid.addWidget(self.recent_days, 0, 1)
 
         grid.addWidget(QLabel("生成模板最少参与图像数:"), 1, 0)
@@ -146,6 +211,31 @@ class MainWindow(QMainWindow):
         self.preprocess_threads.setRange(1, 64)
         self.preprocess_threads.setValue(20)
         grid.addWidget(self.preprocess_threads, 3, 1)
+
+        grid.addWidget(QLabel("检查抽样对照数(0=关):"), 4, 0)
+        self.check_diff = QSpinBox()
+        self.check_diff.setRange(0, 999)
+        self.check_diff.setValue(0)
+        grid.addWidget(self.check_diff, 4, 1)
+
+        grid.addWidget(QLabel("模板加常数(k·σ, 0=关):"), 5, 0)
+        self.add_const_sigma = QDoubleSpinBox()
+        self.add_const_sigma.setRange(0.0, 100.0)
+        self.add_const_sigma.setSingleStep(0.5)
+        self.add_const_sigma.setDecimals(1)
+        self.add_const_sigma.setValue(5.0)
+        grid.addWidget(self.add_const_sigma, 5, 1)
+
+        grid.addWidget(QLabel("无覆盖像素(NaN):"), 6, 0)
+        self.nan_fill_combo = QComboBox()
+        self.nan_fill_combo.addItem("保留 NaN", "keep")
+        self.nan_fill_combo.addItem("填背景常数", "bg")
+        self.nan_fill_combo.addItem("填 0", "zero")
+        grid.addWidget(self.nan_fill_combo, 6, 1)
+
+        self.overwrite_chk = QCheckBox("覆盖已存在模板")
+        self.overwrite_chk.setChecked(False)
+        grid.addWidget(self.overwrite_chk, 7, 0, 1, 2)
         layout.addWidget(param_box)
 
         target_box = QGroupBox("目标与工作目录")
@@ -264,10 +354,34 @@ class MainWindow(QMainWindow):
         self.min_images.setValue(int(gc.get("min_images") or 30))
         self.preprocess_threads.setValue(int(gc.get("preprocess_threads") or 20))
         self.swarp_threads.setValue(int(gc.get("swarp_threads") or 0))
+        try:
+            self.add_const_sigma.setValue(float(gc.get("add_constant_sigma")))
+        except Exception:
+            self.add_const_sigma.setValue(5.0)
+        idx_nf = self.nan_fill_combo.findData(str(gc.get("nan_fill") or "keep"))
+        self.nan_fill_combo.setCurrentIndex(idx_nf if idx_nf >= 0 else 0)
+        self.overwrite_chk.setChecked(bool(gc.get("overwrite_templates")))
         self.workspace_edit.setText(str(gc.get("workspace") or DEFAULT_WORKSPACE))
+        check_dir = str(gc.get("check_dir") or "")
+        self.check_dir_edit.setText(check_dir)
+        if check_dir and os.path.isdir(check_dir):
+            self._list_dir_contents(check_dir)
         last_tab = int(gc.get("last_tab") or 0)
         if 0 <= last_tab < self.tabs.count():
             self.tabs.setCurrentIndex(last_tab)
+
+        # 载入完成后再接自动保存，避免加载过程回写；任何改动即时落盘，不会因异常退出而丢配置
+        for w in (self.recent_days, self.min_images, self.swarp_threads,
+                  self.preprocess_threads, self.check_diff, self.add_const_sigma):
+            w.valueChanged.connect(self._autosave)
+        for w in (self.workspace_edit, self.check_dir_edit):
+            w.editingFinished.connect(self._autosave)
+        self.targets_edit.textChanged.connect(self._autosave)
+        self.nan_fill_combo.currentIndexChanged.connect(self._autosave)
+        self.overwrite_chk.toggled.connect(self._autosave)
+
+    def _autosave(self, *args) -> None:
+        self._save_gui_config()
 
     def _save_gui_config(self) -> None:
         self.gui_config.update(
@@ -279,7 +393,11 @@ class MainWindow(QMainWindow):
             min_images=self.min_images.value(),
             preprocess_threads=self.preprocess_threads.value(),
             swarp_threads=self.swarp_threads.value(),
+            add_constant_sigma=self.add_const_sigma.value(),
+            nan_fill=self.nan_fill_combo.currentData(),
+            overwrite_templates=self.overwrite_chk.isChecked(),
             workspace=self.workspace_edit.text().strip(),
+            check_dir=self.check_dir_edit.text().strip(),
         )
 
     def _on_tab_changed(self, _index: int) -> None:
@@ -327,6 +445,9 @@ class MainWindow(QMainWindow):
             min_images=self.min_images.value(),
             preprocess_threads=self.preprocess_threads.value(),
             swarp_threads=self.swarp_threads.value(),
+            add_constant_sigma=self.add_const_sigma.value(),
+            nan_fill=self.nan_fill_combo.currentData() or "keep",
+            overwrite_templates=self.overwrite_chk.isChecked(),
         )
 
     def _start_template(self, action: str) -> None:
@@ -351,8 +472,294 @@ class MainWindow(QMainWindow):
         self.worker = worker
         worker.start()
 
+    # ---------------- check tab ----------------
+    def _build_check_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        top = QGroupBox("模板目录")
+        row = QHBoxLayout(top)
+        self.check_dir_edit = QLineEdit()
+        self.check_dir_edit.setPlaceholderText("选择包含模板 *.fits 的目录（例如 templates_update/output/gy6）")
+        browse = QPushButton("浏览...")
+        browse.clicked.connect(self._pick_check_dir)
+        self.check_btn = QPushButton("检查")
+        self.check_btn.clicked.connect(self._start_check)
+        self.reveal_btn = QPushButton("转到文件")
+        self.reveal_btn.clicked.connect(self._reveal_current)
+        self.preview_btn = QPushButton("查看")
+        self.preview_btn.clicked.connect(self._preview_current)
+        self.to_targets_btn = QPushButton("填入天区列表")
+        self.to_targets_btn.clicked.connect(self._fill_targets_from_selection)
+        row.addWidget(self.check_dir_edit, 1)
+        row.addWidget(browse)
+        row.addWidget(self.check_btn)
+        row.addWidget(self.reveal_btn)
+        row.addWidget(self.preview_btn)
+        row.addWidget(self.to_targets_btn)
+        layout.addWidget(top)
+
+        self.check_status = QLabel("就绪")
+        layout.addWidget(self.check_status)
+
+        self._check_results = []
+        self._dir_files = []
+        self._results_by_name = {}
+        self.check_table = QTableWidget(0, 11)
+        self.check_table.setHorizontalHeaderLabels(
+            ["文件", "状态", "尺寸", "NaN/Inf", "FOV宽′", "FOV高′", "FWHM", "椭圆度",
+             "LM5SIG", "背景RMS", "问题"])
+        self.check_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.check_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.check_table.setSortingEnabled(True)
+        header = self.check_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(10, QHeaderView.Stretch)
+        layout.addWidget(self.check_table, 1)
+
+        note = QLabel("颜色：绿=正常，橙=警告，红=错误。选中若干行则只检查选中项，未选中则检查目录全部。"
+                      "（几何离群判据需 ≥8 个样本，子集检查时通常不触发。）")
+        note.setStyleSheet("color: gray;")
+        layout.addWidget(note)
+        return page
+
+    def _pick_check_dir(self) -> None:
+        start = self.check_dir_edit.text() or self.workspace_edit.text() or BASE_DIR
+        path = QFileDialog.getExistingDirectory(self, "选择模板目录", start)
+        if path:
+            self.check_dir_edit.setText(path)
+            self._list_dir_contents(path)
+
+    def _current_file(self) -> str:
+        row = self.check_table.currentRow()
+        if row < 0:
+            sel = self.check_table.selectionModel().selectedRows()
+            row = sel[0].row() if sel else -1
+        if row < 0:
+            return ""
+        item = self.check_table.item(row, 0)
+        if item is None:
+            return ""
+        return os.path.join(self.check_dir_edit.text().strip(), item.text())
+
+    def _fill_targets_from_selection(self) -> None:
+        rows = sorted({idx.row() for idx in self.check_table.selectionModel().selectedRows()})
+        if not rows:
+            cur = self.check_table.currentRow()
+            if cur >= 0:
+                rows = [cur]
+        if not rows:
+            QMessageBox.warning(self, "提示", "请先在表格中选中要处理的行。")
+            return
+        tel = os.path.basename(os.path.normpath(self.check_dir_edit.text().strip()))
+        system = tel.upper() if re.match(r"^gy\d+$", tel, re.IGNORECASE) else ""
+        items, skipped = [], []
+        for r in rows:
+            item = self.check_table.item(r, 0)
+            if item is None:
+                continue
+            region = os.path.splitext(item.text())[0]
+            if not re.match(r"^K\d{3}-\d+$", region, re.IGNORECASE):
+                skipped.append(item.text())
+                continue
+            items.append(f"{system}_{region}" if system else region)
+        if not items:
+            QMessageBox.warning(self, "提示", "选中的行里没有可识别的天区名（形如 K017-1）。")
+            return
+        self.targets_edit.setPlainText(", ".join(items))
+        self._save_gui_config()
+        if not system:
+            self._log("[检查模板] 未能从目录名识别系统名，天区未加系统前缀。")
+        if skipped:
+            self._log(f"[检查模板] 跳过无法识别的行: {', '.join(skipped)}")
+        self._log(f"[检查模板] 已填入天区列表 {len(items)} 项。")
+        self.tabs.setCurrentIndex(1)  # 切到“升级模板”
+
+    def _reveal_current(self) -> None:
+        path = self._current_file()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "提示", "请先在表格中选中一行模板。")
+            return
+        try:
+            subprocess.Popen(["explorer", "/select," + os.path.normpath(path)])
+        except Exception:
+            os.startfile(os.path.dirname(path))
+
+    def _preview_current(self) -> None:
+        path = self._current_file()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "提示", "请先在表格中选中一行模板。")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from .preview import asinh_png
+            png = asinh_png(path)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.showerror("错误", f"生成预览失败:\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        pixmap = QPixmap(png)
+        if pixmap.isNull():
+            QMessageBox.showerror("错误", "无法加载预览图。")
+            return
+        self._log(f"[检查模板] 预览: {png}")
+        dlg = PreviewDialog(pixmap, f"asinh 预览 - {os.path.basename(path)}", self)
+        dlg.exec()
+
+    def _list_dir_contents(self, path: str) -> None:
+        """列出目录内全部模板，并尝试载入上次保存的结果。"""
+        try:
+            self._dir_files = sorted(f for f in os.listdir(path)
+                                     if os.path.isfile(os.path.join(path, f)) and is_template_file(f))
+        except Exception as e:
+            self._dir_files = []
+            self.check_status.setText(f"无法读取目录: {e}")
+            self.check_status.setStyleSheet("color: red;")
+            return
+        self._results_by_name = self._load_saved_results(path)
+        self._refresh_check_table()
+        n_re = len(self._results_by_name)
+        self.check_status.setText(f"目录共 {len(self._dir_files)} 个模板；已载入上次结果 {n_re} 个。点击“检查”开始。")
+        self.check_status.setStyleSheet("color: black;")
+
+    def _check_store_dir(self, template_dir: str) -> str:
+        """检查结果的存放目录（在当前项目目录下，而非模板目录）。"""
+        norm = os.path.normpath(template_dir)
+        name = os.path.basename(norm) or "root"
+        parent = os.path.basename(os.path.dirname(norm))
+        key = f"{parent}__{name}" if parent and parent not in (".", os.sep) else name
+        store = os.path.join(BASE_DIR, "check_results", key)
+        os.makedirs(store, exist_ok=True)
+        return store
+
+    def _results_json(self, path: str) -> str:
+        return os.path.join(self._check_store_dir(path), "fits_check_results.json")
+
+    def _report_path_for(self, template_dir: str) -> str:
+        return os.path.join(self._check_store_dir(template_dir), "fits_check_report.txt")
+
+    def _load_saved_results(self, path: str) -> dict:
+        import json
+        fp = self._results_json(path)
+        if not os.path.isfile(fp):
+            return {}
+        try:
+            with open(fp, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return {e["name"]: e for e in data if isinstance(e, dict) and e.get("name")}
+        except Exception:
+            return {}
+
+    def _refresh_check_table(self) -> None:
+        """按目录清单渲染：已检查的显示结果，其余显示“未检查”。"""
+        self.check_table.setRowCount(0)
+        for name in self._dir_files:
+            e = self._results_by_name.get(name)
+            if e is None:
+                e = {"name": name, "_pending": True}
+            self._add_check_row(e)
+        self._check_results = list(self._results_by_name.values())
+
+    def _persist_results(self, path: str) -> None:
+        from .check_templates import save_results
+        fp = self._results_json(path)
+        entries = [self._results_by_name[n] for n in self._dir_files if n in self._results_by_name]
+        save_results(entries, fp)
+
+    def _add_check_row(self, e: dict) -> None:
+        # 排序期间禁止刷新以免错行
+        self.check_table.setSortingEnabled(False)
+        r = self.check_table.rowCount()
+        self.check_table.insertRow(r)
+        errs, warns = e.get("errors", []), e.get("warnings", [])
+        if e.get("_pending"):
+            status, color = "未检查", QColor("gray")
+        elif errs:
+            status, color = "错误", QColor("red")
+        elif warns:
+            status, color = "警告", QColor("#c77700")
+        else:
+            status, color = "正常", QColor("green")
+
+        def fmt(v, nd=2):
+            try:
+                return f"{float(v):.{nd}f}"
+            except Exception:
+                return "-"
+
+        shape = e.get("shape")
+        shape = f"{shape[0]}×{shape[1]}" if isinstance(shape, (tuple, list)) else "-"
+        nf = e.get("nonfinite")
+        nf = "-" if nf is None else str(nf)
+        issue = "; ".join(errs + warns)
+        vals = [e.get("name", ""), status, shape, nf,
+                fmt(e.get("fov_w_arcmin")), fmt(e.get("fov_h_arcmin")),
+                fmt(e.get("fwhm")), fmt(e.get("ellipticity"), 3), fmt(e.get("lm5sig")),
+                fmt(e.get("bg_rms")), issue]
+        for c, v in enumerate(vals):
+            item = QTableWidgetItem(str(v))
+            if c == 1:
+                item.setForeground(color)
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
+            self.check_table.setItem(r, c, item)
+        self.check_table.setSortingEnabled(True)
+
+    def _start_check(self) -> None:
+        if self._busy():
+            QMessageBox.warning(self, "提示", "已有任务正在运行，请等待完成。")
+            return
+        template_dir = self.check_dir_edit.text().strip()
+        if not os.path.isdir(template_dir):
+            QMessageBox.showerror("错误", f"模板目录不存在:\n{template_dir}")
+            return
+        tel = os.path.basename(os.path.normpath(template_dir)).lower()
+        frame_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.normpath(template_dir))), "update", tel)
+        report_path = self._report_path_for(template_dir)
+
+        # 有选中行 -> 只检查选中项；否则检查全部
+        file_list = None
+        rows = sorted({idx.row() for idx in self.check_table.selectionModel().selectedRows()})
+        if rows:
+            file_list = [self.check_table.item(r, 0).text() for r in rows
+                         if self.check_table.item(r, 0) is not None]
+        scope = f"选中 {len(file_list)} 个" if file_list else "全部"
+        self._log(f"[检查模板] 目录: {template_dir}（检查范围: {scope}）")
+        self._save_gui_config()
+        self._set_buttons_enabled(False)
+        worker = CheckTemplatesWorker(template_dir, report_path,
+                                      frame_dir=frame_dir,
+                                      diff_sample=self.check_diff.value(),
+                                      file_list=file_list, parent=self)
+        worker.status.connect(self._set_check_status)
+        worker.log_line.connect(self._log)
+        worker.results.connect(self._populate_check_table)
+        worker.finished.connect(self._on_check_finished)
+        self.worker = worker
+        worker.start()
+
+    def _set_check_status(self, text: str, color: str) -> None:
+        self.check_status.setText(text)
+        self.check_status.setStyleSheet(f"color: {color};")
+
+    def _populate_check_table(self, entries: list) -> None:
+        # 合并到累计结果（按文件名），未参与本次检查的保持原状态
+        for e in entries:
+            name = e.get("name")
+            if name:
+                self._results_by_name[name] = e
+        template_dir = self.check_dir_edit.text().strip()
+        if template_dir and os.path.isdir(template_dir):
+            self._persist_results(template_dir)
+        self._refresh_check_table()
+
+    def _on_check_finished(self) -> None:
+        self._set_buttons_enabled(True)
+
     def _set_buttons_enabled(self, enabled: bool) -> None:
-        for b in (self.btn_download, self.btn_preprocess, self.btn_make):
+        for b in (self.btn_download, self.btn_preprocess, self.btn_make, self.check_btn):
             b.setEnabled(enabled)
 
     def _on_template_finished(self) -> None:

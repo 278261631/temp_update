@@ -53,6 +53,9 @@ class UpdateSettings:
     fwhm_thres: float = 10.0
     swarp_threads: int = 0  # SWarp 线程数（0=自动）
     swarp_resampling: str = "BILINEAR"  # SWarp 重采样核
+    add_constant_sigma: float = 5.0  # 叠加后加常数 C=k·σ(背景) 并截断负值到0（0=关闭）
+    nan_fill: str = "keep"  # 无覆盖(NaN)像素填充: keep/背景常数(bg)/zero
+    overwrite_templates: bool = False  # 输出模板已存在时是否覆盖重生成
 
 
 def collect_regions(config: AppConfig, start: str, end: str,
@@ -117,7 +120,51 @@ class TemplateEngine:
         tel = system_name.lower()
         self.update_root = os.path.join(self.workspace_root, "update", tel)
         self.output_root = os.path.join(self.workspace_root, "output", tel)
+        self.cropped_root = os.path.join(self.workspace_root, "cropped", tel)
         return system_name, problems
+
+    # QHY600(IMX455) 满幅 9600x6422 -> 有效 9576x6388：左 24 列 + 末端 34 行光学黑/dummy
+    OB_CROP_COLS_BIN1 = 24
+    OB_CROP_ROWS_BIN1 = 34
+
+    def _save_cropped(self, fits_path: str) -> bool:
+        """按 bin 裁掉边缘光学黑像素，另存到 cropped/<tel>/。返回是否成功。"""
+        import numpy as np
+        from astropy.io import fits
+
+        cropped_root = getattr(self, "cropped_root", None)
+        if not cropped_root:
+            return False
+        try:
+            with fits.open(fits_path, memmap=False, do_not_scale_image_data=True) as hdul:
+                hdr = hdul[0].header.copy()
+                data = np.asarray(hdul[0].data)
+            binx = int(hdr.get("XBINNING", hdr.get("BINX", 1)) or 1)
+            biny = int(hdr.get("YBINNING", hdr.get("BINY", 1)) or 1)
+            lcols = self.OB_CROP_COLS_BIN1 // binx   # bin1=24, bin2=12
+            brows = self.OB_CROP_ROWS_BIN1 // biny   # bin1=34, bin2=17
+            ny, nx = data.shape
+            if lcols <= 0 and brows <= 0:
+                return False
+            if lcols >= nx or brows >= ny:
+                self.log(f"[预处理-裁切] 尺寸异常，跳过: {fits_path}")
+                return False
+            cropped = data[:ny - brows, lcols:].copy()
+            if "CRPIX1" in hdr:
+                hdr["CRPIX1"] = float(hdr["CRPIX1"]) - lcols
+            for k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                hdr.pop(k, None)
+            os.makedirs(cropped_root, exist_ok=True)
+            fits.PrimaryHDU(data=cropped, header=hdr).writeto(
+                os.path.join(cropped_root, os.path.basename(fits_path)), overwrite=True)
+            return True
+        except Exception as e:
+            self.log(f"[预处理-裁切] 失败 {fits_path}: {e}")
+            return False
+
+    def _template_source_dir(self) -> str:
+        """模板生成只使用裁切后的帧目录 cropped/<tel>/（不再回退原帧）。"""
+        return getattr(self, "cropped_root", self.update_root)
 
     def _select_candidates(self, fits_files, k_full):
         pattern = k_full.lower()
@@ -346,13 +393,19 @@ class TemplateEngine:
             return
 
         os.makedirs(self.bad_dir, exist_ok=True)
+        os.makedirs(self.cropped_root, exist_ok=True)
         total = len(fits_files)
-        counters = {"processed": 0, "bad": 0}
+        counters = {"processed": 0, "bad": 0, "cropped": 0}
         lock = threading.Lock()
 
         def _process(path: Path):
             is_bad, reasons = self._quality_of(str(path))
-            if is_bad:
+            if not is_bad:
+                # 合格帧：按 bin 裁掉边缘光学黑，另存到 cropped/<tel>/
+                if self._save_cropped(str(path)):
+                    with lock:
+                        counters["cropped"] += 1
+            else:
                 try:
                     shutil.move(str(path), os.path.join(self.bad_dir, path.name))
                     self.log(f"[预处理] 移动到 bad_img: {path.name} ({'; '.join(reasons)})")
@@ -368,10 +421,11 @@ class TemplateEngine:
 
         from concurrent.futures import ThreadPoolExecutor
         workers = max(1, self.settings.preprocess_threads)
-        self.status(f"开始预处理 {total} 个FITS文件（ASTAP多线程 + 质量筛选）...", "blue")
+        self.status(f"开始预处理 {total} 个FITS文件（ASTAP + 质量筛选 + 边缘裁切）...", "blue")
         with ThreadPoolExecutor(max_workers=workers) as executor:
             executor.map(_process, fits_files)
-        self.status(f"预处理完成：共处理 {total} 个文件，坏图像 {counters['bad']} 个。", "green")
+        self.status(f"预处理完成：共处理 {total} 个文件，坏图像 {counters['bad']} 个，"
+                    f"裁切保存 {counters['cropped']} 个 -> {self.cropped_root}", "green")
 
     # ---------- 生成模板（SWarp 后端）----------
     def _coadd_swarp(self, input_files, field_name: str):
@@ -398,23 +452,38 @@ class TemplateEngine:
             self.log(f"[生成] swarp 失败: {msg}")
             return None, None
 
-        with fits.open(coadd_path) as h:
-            data = h[0].data.astype("float32")
-            header = h[0].header.copy()
-        weight = None
-        if os.path.exists(weight_path):
-            try:
-                with fits.open(weight_path) as w:
-                    weight = w[0].data
-            except Exception:
-                weight = None
-        if weight is not None:
-            data = np.where(weight > 0, data, np.nan).astype("float32")
-        for p in (coadd_path, weight_path):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        try:
+            with fits.open(coadd_path) as h:
+                data = h[0].data.astype("float32")
+                header = h[0].header.copy()
+            weight = None
+            if os.path.exists(weight_path):
+                try:
+                    with fits.open(weight_path) as w:
+                        weight = w[0].data
+                except Exception:
+                    weight = None
+            if weight is not None:
+                data = np.where(weight > 0, data, np.nan).astype("float32")
+
+            # 稳健加常数：以 k·σ(背景) 为直流偏置直接写入数据，残余负值截断到 0
+            k = float(getattr(self.settings, "add_constant_sigma", 0.0) or 0.0)
+            if k > 0:
+                from astropy.stats import sigma_clipped_stats
+                finite = data[np.isfinite(data)]
+                if finite.size:
+                    _, _, std = sigma_clipped_stats(finite, sigma=3.0, maxiters=5)
+                    c = float(np.ceil(k * float(std)))
+                    data = np.where(np.isfinite(data), np.maximum(data + c, 0.0), data).astype("float32")
+                    header["BKGADD"] = (c, "constant added after coadd (robust k*sigma)")
+                    header["BKGSIG"] = (float(std), "sigma-clipped background RMS")
+                    self.log(f"[生成] {field_name} 加常数 C={c:.0f} (k={k}·σ, σ={std:.2f})，负值截断到 0")
+        finally:
+            for p in (coadd_path, weight_path):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
         return data, header
 
     def _write_template(self, field_name: str, input_files) -> bool:
@@ -429,18 +498,19 @@ class TemplateEngine:
 
         out_dir = Path(self.output_root)
         out_dir.mkdir(parents=True, exist_ok=True)
-        fits.writeto(out_dir / f"{field_name}_no_trim.fits", data, header, overwrite=True)
 
+        # 裁剪范围由“有限像素”决定（必须在填充 NaN 之前算）
         mask = np.isfinite(data)
         if not mask.any():
             self.log(f"[生成] {field_name} 合成结果全部为NaN，跳过裁剪。")
             return False
-
         ys, xs = np.where(mask)
         y_min, y_max = int(ys.min()), int(ys.max())
         x_min, x_max = int(xs.min()), int(xs.max())
-        trimmed = data[y_min:y_max + 1, x_min:x_max + 1].astype("float32")
 
+        # 依据 nan_fill 选项填充无覆盖像素（仅保留裁剪后的正式模板，不写 no_trim）
+        data_filled = self._apply_nan_fill(data, header)
+        trimmed = data_filled[y_min:y_max + 1, x_min:x_max + 1].astype("float32")
         header = header.copy()
         if "CRPIX1" in header:
             header["CRPIX1"] -= x_min
@@ -448,9 +518,24 @@ class TemplateEngine:
             header["CRPIX2"] -= y_min
         fits.writeto(out_dir / f"{field_name}.fits", trimmed, header, overwrite=True)
 
-        self.log(f"[生成] 完成 {field_name} (swarp) -> {out_dir / (field_name + '.fits')}，"
-                 f"用时 {time.time() - start_time:.1f} 秒")
+        self.log(f"[生成] 完成 {field_name} (swarp, nan_fill={getattr(self.settings,'nan_fill','keep')}) "
+                 f"-> {out_dir / (field_name + '.fits')}，用时 {time.time() - start_time:.1f} 秒")
         return True
+
+    def _apply_nan_fill(self, data, header):
+        """按设置填充非有限值：keep=保留NaN, bg=背景常数(BKGADD), zero=0。"""
+        import numpy as np
+
+        mode = (getattr(self.settings, "nan_fill", "keep") or "keep").lower()
+        if mode == "keep":
+            return data
+        val = 0.0
+        if mode == "bg":
+            try:
+                val = float(header.get("BKGADD", 0.0))
+            except Exception:
+                val = 0.0
+        return np.where(np.isfinite(data), data, val).astype("float32")
 
     def make_templates(self) -> None:
         from astropy.io import fits
@@ -462,21 +547,28 @@ class TemplateEngine:
         if not selected:
             self.status("请输入要处理的天区列表（例如 GY6_K002-8,GY6_K002-9）。", "orange")
             return
-        update_root_path = Path(self.update_root)
-        if not update_root_path.exists():
-            self.status("下载目录不存在，请先点击“下载目标天区对应观测文件”。", "red")
+        # 只使用裁切后的帧（cropped/<tel>/），不回退原帧
+        source_dir = self._template_source_dir()
+        update_root_path = Path(source_dir)
+        has_frames = update_root_path.is_dir() and any(
+            p for ext in ("*.fits", "*.fit", "*.fts", "*.FITS", "*.FIT")
+            for p in update_root_path.glob(ext))
+        if not has_frames:
+            self.status(f"未找到裁切后的帧（{source_dir}），请先执行“预处理图像”。", "red")
+            self.log(f"[模板生成] 无裁切帧，终止。目录: {source_dir}")
             return
+        self.log(f"[模板生成] 使用裁切帧目录: {source_dir}")
 
         os.makedirs(self.output_root, exist_ok=True)
 
-        self.status("正在对下载文件执行ASTAP解算...", "blue")
+        self.status("正在对帧文件执行ASTAP解算...", "blue")
 
         def _astap_progress(current, total, file_path, success):
             self.status(f"ASTAP解算: ({current}/{total}) {'成功' if success else '失败'} - {os.path.basename(file_path)}",
                         "blue" if success else "orange")
 
         try:
-            self.astap_processor.process_directory(self.update_root, progress_callback=_astap_progress)
+            self.astap_processor.process_directory(source_dir, progress_callback=_astap_progress)
         except Exception as e:
             self.log(f"[模板生成] ASTAP解算过程中出错: {e}")
 
@@ -494,8 +586,8 @@ class TemplateEngine:
                 self.log(f"[模板生成] 无法解析天区编号: {k_number}-{suffix}")
                 continue
 
-            if (Path(self.output_root) / f"{field_name}.fits").exists():
-                self.log(f"[模板生成] 已存在输出模板 {k_full}，跳过。")
+            if (Path(self.output_root) / f"{field_name}.fits").exists() and not getattr(self.settings, "overwrite_templates", False):
+                self.log(f"[模板生成] 已存在输出模板 {k_full}，跳过（如需覆盖请勾选“覆盖已存在模板”）。")
                 continue
 
             pattern = k_full.lower()

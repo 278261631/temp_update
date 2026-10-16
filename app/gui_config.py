@@ -27,7 +27,11 @@ class GuiConfig:
             "min_images": 30,
             "preprocess_threads": 20,
             "swarp_threads": 0,
+            "add_constant_sigma": 5.0,
+            "nan_fill": "keep",
+            "overwrite_templates": False,
             "workspace": os.path.join(BASE_DIR, "templates_update"),
+            "check_dir": "",
         }
         self.path = path or GUI_CONFIG_PATH
         self.data: Dict[str, Any] = dict(self.defaults)

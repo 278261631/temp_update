@@ -5,6 +5,7 @@
 """
 
 import os
+import shutil
 import subprocess
 from typing import List, Optional, Tuple
 
@@ -53,6 +54,7 @@ class SwarpBackend:
             "-SUBTRACT_BACK", "Y" if subtract_back else "N",
             "-RESAMPLE_DIR", resample_dir,
             "-DELETE_TMPFILES", "Y",
+            "-WRITE_XML", "N",
             "-VERBOSE_TYPE", "QUIET",
             "-NTHREADS", str(int(threads)),
         ]
@@ -60,7 +62,14 @@ class SwarpBackend:
             r = subprocess.run(args, cwd=workdir, capture_output=True,
                                text=True, timeout=self.timeout)
         except subprocess.TimeoutExpired:
+            shutil.rmtree(resample_dir, ignore_errors=True)
             return False, "swarp 超时"
+        # 清理临时 resample 目录与可能残留的 swarp.xml
+        shutil.rmtree(resample_dir, ignore_errors=True)
+        try:
+            os.remove(os.path.join(workdir, "swarp.xml"))
+        except OSError:
+            pass
         self.last_message = (r.stdout or "") + (r.stderr or "")
         ok = r.returncode == 0 and os.path.isfile(out_abs) and os.path.getsize(out_abs) > 0
         return ok, self.last_message[-500:]

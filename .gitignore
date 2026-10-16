@@ -225,4 +225,5 @@ config/gui_config.json
 gui_config.json
 data/
 templates_update/
+check_results/
 *.log

@@ -37,6 +37,34 @@ class RegionCollectWorker(_BaseWorker):
             self.log_line.emit(f"[天区收集] 出错: {e}")
 
 
+class CheckTemplatesWorker(_BaseWorker):
+    results = Signal(list)  # 每个模板的结果 dict 列表
+
+    def __init__(self, template_dir: str, report_path: str,
+                 frame_dir: str = None, diff_sample: int = 0, file_list=None, parent=None):
+        super().__init__(parent)
+        self.template_dir = template_dir
+        self.report_path = report_path
+        self.frame_dir = frame_dir
+        self.diff_sample = diff_sample
+        self.file_list = file_list
+
+    def run(self):
+        from .check_templates import check_and_report
+        try:
+            res = check_and_report(
+                self.template_dir, self.report_path, self.frame_dir, self.diff_sample,
+                log=lambda m: self.log_line.emit(m),
+                status=lambda t, c="black": self.status.emit(t, c),
+                file_list=self.file_list,
+            )
+            self.results.emit(res.get("files", []))
+        except Exception as e:
+            self._failed = True
+            self.status.emit(f"检查出错: {e}", "red")
+            self.log_line.emit(f"[检查] 出错: {e}")
+
+
 class TemplateWorker(_BaseWorker):
     """action ∈ {download, preprocess, make}"""
 
