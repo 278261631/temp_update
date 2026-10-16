@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """PySide6 主界面：天区收集 + 升级模板。"""
 
 import os
@@ -206,36 +206,48 @@ class MainWindow(QMainWindow):
         self.swarp_threads.setValue(0)
         grid.addWidget(self.swarp_threads, 2, 1)
 
-        grid.addWidget(QLabel("预处理线程数:"), 3, 0)
+        grid.addWidget(QLabel("合成方式:"), 3, 0)
+        self.combine_combo = QComboBox()
+        self.combine_combo.addItem("中值 MEDIAN", "MEDIAN")
+        self.combine_combo.addItem("平均 AVERAGE", "AVERAGE")
+        grid.addWidget(self.combine_combo, 3, 1)
+
+        grid.addWidget(QLabel("预处理线程数:"), 4, 0)
         self.preprocess_threads = QSpinBox()
         self.preprocess_threads.setRange(1, 64)
         self.preprocess_threads.setValue(20)
-        grid.addWidget(self.preprocess_threads, 3, 1)
+        grid.addWidget(self.preprocess_threads, 4, 1)
 
-        grid.addWidget(QLabel("检查抽样对照数(0=关):"), 4, 0)
+        grid.addWidget(QLabel("检查抽样对照数(0=关):"), 5, 0)
         self.check_diff = QSpinBox()
         self.check_diff.setRange(0, 999)
         self.check_diff.setValue(0)
-        grid.addWidget(self.check_diff, 4, 1)
+        grid.addWidget(self.check_diff, 5, 1)
 
-        grid.addWidget(QLabel("模板加常数(k·σ, 0=关):"), 5, 0)
+        grid.addWidget(QLabel("模板加常数(k·σ, 0=关):"), 6, 0)
         self.add_const_sigma = QDoubleSpinBox()
         self.add_const_sigma.setRange(0.0, 100.0)
         self.add_const_sigma.setSingleStep(0.5)
         self.add_const_sigma.setDecimals(1)
         self.add_const_sigma.setValue(5.0)
-        grid.addWidget(self.add_const_sigma, 5, 1)
+        grid.addWidget(self.add_const_sigma, 6, 1)
 
-        grid.addWidget(QLabel("无覆盖像素(NaN):"), 6, 0)
+        grid.addWidget(QLabel("无覆盖像素(NaN):"), 7, 0)
         self.nan_fill_combo = QComboBox()
         self.nan_fill_combo.addItem("保留 NaN", "keep")
         self.nan_fill_combo.addItem("填背景常数", "bg")
         self.nan_fill_combo.addItem("填 0", "zero")
-        grid.addWidget(self.nan_fill_combo, 6, 1)
+        grid.addWidget(self.nan_fill_combo, 7, 1)
+
+        grid.addWidget(QLabel("最小覆盖帧数(0=关):"), 8, 0)
+        self.min_frames = QSpinBox()
+        self.min_frames.setRange(0, 9999)
+        self.min_frames.setValue(0)
+        grid.addWidget(self.min_frames, 8, 1)
 
         self.overwrite_chk = QCheckBox("覆盖已存在模板")
         self.overwrite_chk.setChecked(False)
-        grid.addWidget(self.overwrite_chk, 7, 0, 1, 2)
+        grid.addWidget(self.overwrite_chk, 9, 0, 1, 2)
         layout.addWidget(param_box)
 
         target_box = QGroupBox("目标与工作目录")
@@ -360,6 +372,12 @@ class MainWindow(QMainWindow):
             self.add_const_sigma.setValue(5.0)
         idx_nf = self.nan_fill_combo.findData(str(gc.get("nan_fill") or "keep"))
         self.nan_fill_combo.setCurrentIndex(idx_nf if idx_nf >= 0 else 0)
+        try:
+            self.min_frames.setValue(int(gc.get("min_frames") or 0))
+        except Exception:
+            self.min_frames.setValue(0)
+        idx_cb = self.combine_combo.findData(str(gc.get("swarp_combine") or "MEDIAN"))
+        self.combine_combo.setCurrentIndex(idx_cb if idx_cb >= 0 else 0)
         self.overwrite_chk.setChecked(bool(gc.get("overwrite_templates")))
         self.workspace_edit.setText(str(gc.get("workspace") or DEFAULT_WORKSPACE))
         check_dir = str(gc.get("check_dir") or "")
@@ -372,12 +390,14 @@ class MainWindow(QMainWindow):
 
         # 载入完成后再接自动保存，避免加载过程回写；任何改动即时落盘，不会因异常退出而丢配置
         for w in (self.recent_days, self.min_images, self.swarp_threads,
-                  self.preprocess_threads, self.check_diff, self.add_const_sigma):
+                  self.preprocess_threads, self.check_diff, self.add_const_sigma,
+                  self.min_frames):
             w.valueChanged.connect(self._autosave)
         for w in (self.workspace_edit, self.check_dir_edit):
             w.editingFinished.connect(self._autosave)
         self.targets_edit.textChanged.connect(self._autosave)
         self.nan_fill_combo.currentIndexChanged.connect(self._autosave)
+        self.combine_combo.currentIndexChanged.connect(self._autosave)
         self.overwrite_chk.toggled.connect(self._autosave)
 
     def _autosave(self, *args) -> None:
@@ -395,6 +415,8 @@ class MainWindow(QMainWindow):
             swarp_threads=self.swarp_threads.value(),
             add_constant_sigma=self.add_const_sigma.value(),
             nan_fill=self.nan_fill_combo.currentData(),
+            swarp_combine=self.combine_combo.currentData(),
+            min_frames=self.min_frames.value(),
             overwrite_templates=self.overwrite_chk.isChecked(),
             workspace=self.workspace_edit.text().strip(),
             check_dir=self.check_dir_edit.text().strip(),
@@ -447,6 +469,8 @@ class MainWindow(QMainWindow):
             swarp_threads=self.swarp_threads.value(),
             add_constant_sigma=self.add_const_sigma.value(),
             nan_fill=self.nan_fill_combo.currentData() or "keep",
+            swarp_combine=self.combine_combo.currentData() or "MEDIAN",
+            min_frames=self.min_frames.value(),
             overwrite_templates=self.overwrite_chk.isChecked(),
         )
 

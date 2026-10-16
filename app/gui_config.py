@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """GUI 状态配置：记录上次选择的标签页、天区列表及各项参数。
 
 保存位置：config/gui_config.json（已被 .gitignore 忽略）。
@@ -27,8 +27,10 @@ class GuiConfig:
             "min_images": 30,
             "preprocess_threads": 20,
             "swarp_threads": 0,
+            "swarp_combine": "MEDIAN",
             "add_constant_sigma": 5.0,
             "nan_fill": "keep",
+            "min_frames": 0,
             "overwrite_templates": False,
             "workspace": os.path.join(BASE_DIR, "templates_update"),
             "check_dir": "",

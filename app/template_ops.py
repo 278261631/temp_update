@@ -53,8 +53,10 @@ class UpdateSettings:
     fwhm_thres: float = 10.0
     swarp_threads: int = 0  # SWarp 线程数（0=自动）
     swarp_resampling: str = "BILINEAR"  # SWarp 重采样核
+    swarp_combine: str = "MEDIAN"  # SWarp 合成方式: MEDIAN(中值,推荐) / AVERAGE(平均)
     add_constant_sigma: float = 5.0  # 叠加后加常数 C=k·σ(背景) 并截断负值到0（0=关闭）
     nan_fill: str = "keep"  # 无覆盖(NaN)像素填充: keep/背景常数(bg)/zero
+    min_frames: int = 0  # 只保留被 ≥min_frames 帧覆盖的像素（0=关闭；设为≥帧数即要求全部帧，复刻原版干净观感）
     overwrite_templates: bool = False  # 输出模板已存在时是否覆盖重生成
 
 
@@ -445,7 +447,8 @@ class TemplateEngine:
 
         ok, msg = backend.coadd(
             input_files, coadd_path,
-            combine_type="AVERAGE", resampling=self.settings.swarp_resampling,
+            combine_type=getattr(self.settings, "swarp_combine", "MEDIAN") or "MEDIAN",
+            resampling=self.settings.swarp_resampling,
             threads=self.settings.swarp_threads,
         )
         if not ok:
@@ -464,7 +467,20 @@ class TemplateEngine:
                 except Exception:
                     weight = None
             if weight is not None:
-                data = np.where(weight > 0, data, np.nan).astype("float32")
+                keep = weight > 0
+                min_frames = int(getattr(self.settings, "min_frames", 0) or 0)
+                if min_frames > 0:
+                    try:
+                        from astropy.wcs import WCS
+                        cov = self._frame_coverage(input_files, WCS(header), data.shape)
+                        low = (weight > 0) & (cov < min_frames)
+                        n_masked = int(low.sum())
+                        keep = keep & (cov >= min_frames)
+                        self.log(f"[生成] {field_name} 最小覆盖帧数={min_frames}/{len(input_files)}："
+                                 f"遮蔽低覆盖像素 {n_masked} 个")
+                    except Exception as e:
+                        self.log(f"[生成] {field_name} 覆盖帧数计算失败，跳过该掩膜: {e}")
+                data = np.where(keep, data, np.nan).astype("float32")
 
             # 稳健加常数：以 k·σ(背景) 为直流偏置直接写入数据，残余负值截断到 0
             k = float(getattr(self.settings, "add_constant_sigma", 0.0) or 0.0)
@@ -521,6 +537,40 @@ class TemplateEngine:
         self.log(f"[生成] 完成 {field_name} (swarp, nan_fill={getattr(self.settings,'nan_fill','keep')}) "
                  f"-> {out_dir / (field_name + '.fits')}，用时 {time.time() - start_time:.1f} 秒")
         return True
+
+    def _frame_coverage(self, input_files, out_wcs, shape, stride: int = 4):
+        """统计每个输出像素被多少输入帧覆盖（不依赖 SWarp 权重）。
+
+        在输出网格上按 stride 采样求天球坐标，逐帧 world->pixel 判断是否落在帧内，
+        再上采样回全分辨率。
+        """
+        import numpy as np
+        from astropy.io import fits
+        from astropy.wcs import WCS
+
+        h, w = shape
+        yy, xx = np.mgrid[0:h:stride, 0:w:stride]
+        ra, dec = out_wcs.all_pix2world(xx.astype(float), yy.astype(float), 0)
+        count = np.zeros(ra.shape, dtype=np.int32)
+        for f in input_files:
+            try:
+                with fits.open(f, memmap=True, do_not_scale_image_data=True) as hdul:
+                    fw = WCS(hdul[0].header)
+                    nx = int(hdul[0].header.get("NAXIS1", 0))
+                    ny = int(hdul[0].header.get("NAXIS2", 0))
+            except Exception:
+                continue
+            try:
+                x, y = fw.all_world2pix(ra, dec, 0, quiet=True)
+            except TypeError:
+                x, y = fw.all_world2pix(ra, dec, 0)
+            except Exception:
+                continue
+            inside = (x >= 0) & (x < nx) & (y >= 0) & (y < ny) & np.isfinite(x) & np.isfinite(y)
+            count += inside.astype(np.int32)
+        if stride > 1:
+            count = np.repeat(np.repeat(count, stride, axis=0), stride, axis=1)[:h, :w]
+        return count
 
     def _apply_nan_fill(self, data, header):
         """按设置填充非有限值：keep=保留NaN, bg=背景常数(BKGADD), zero=0。"""
