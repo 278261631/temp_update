@@ -12,11 +12,14 @@ from typing import Dict, List, Tuple
 
 
 def parse_targets(system_name: str, text: str) -> Tuple[str, List[Dict[str, str]]]:
-    """返回 (system_name, targets)。
+    """返回 (默认system_name, targets)。
 
-    targets 元素含 k_number / suffix / k_full，例如 K002 / 8 / K002-8。
+    支持**每个天区自带系统前缀**（如 GY4_K092-4, GY5_K092-7），逐项解析：
+    targets 元素含 system / k_number / suffix / k_full。
+    去重按 (system, k_full)，因此不同系统的同名天区都会保留。
     """
-    system = (system_name or "").strip().upper()
+    default_system = (system_name or "").strip().upper()
+    first_system = default_system
     targets: List[Dict[str, str]] = []
     seen = set()
 
@@ -30,16 +33,19 @@ def parse_targets(system_name: str, text: str) -> Tuple[str, List[Dict[str, str]
         k_number = m.group(1).upper()
         suffix = m.group(2)
         k_full = f"{k_number}-{suffix}"
-        if k_full in seen:
-            continue
-        seen.add(k_full)
-        targets.append({"k_number": k_number, "suffix": suffix, "k_full": k_full})
-        if not system:
-            m_sys = re.search(r"(GY\d+)", token, re.IGNORECASE)
-            if m_sys:
-                system = m_sys.group(1).upper()
 
-    return system, targets
+        m_sys = re.search(r"(GY\d+)", token, re.IGNORECASE)
+        sys_name = m_sys.group(1).upper() if m_sys else default_system
+        key = (sys_name, k_full)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        targets.append({"system": sys_name, "k_number": k_number, "suffix": suffix, "k_full": k_full})
+        if not first_system and sys_name:
+            first_system = sys_name
+
+    return first_system, targets
 
 
 def find_recent_dates_for_region(index: Dict[str, list], region: str, max_count: int) -> List[str]:

@@ -720,36 +720,46 @@ class TemplateEngine:
             k_full = item.get("k_full")
             if not (k_number and suffix and k_full):
                 continue
+            # 每个天区用其自带的系统（支持混合系统列表）
+            target_sys = (item.get("system") or system_upper).upper()
+            tel = target_sys.lower()
+            label = f"{target_sys}_{k_full}"
+            self.update_root = os.path.join(self.workspace_root, "update", tel)
+            self.cropped_root = os.path.join(self.workspace_root, "cropped", tel)
+            self.output_root = os.path.join(self.workspace_root, "output", tel)
+            for d in (self.update_root, self.cropped_root, self.output_root, self.bad_dir):
+                os.makedirs(d, exist_ok=True)
+
             try:
                 field_name = f"K{int(str(k_number).lstrip('Kk')):03d}-{int(suffix)}"
             except Exception:
                 continue
 
             if (Path(self.output_root) / f"{field_name}.fits").exists() and not self.settings.overwrite_templates:
-                self.status(f"[{idx}/{total}] {k_full} 已存在，跳过（勾选“覆盖已存在模板”可重生成）。", "orange")
+                self.status(f"[{idx}/{total}] {label} 已存在，跳过（勾选“覆盖已存在模板”可重生成）。", "orange")
                 continue
 
             dates = find_recent_dates_for_region(index, k_number, recent_days)
             if not dates:
-                self.status(f"[{idx}/{total}] {k_full} 在索引中无日期，跳过。", "orange")
+                self.status(f"[{idx}/{total}] {label} 在索引中无日期，跳过。", "orange")
                 continue
 
             span = f"{dates[0]}..{dates[-1]}"
-            self.status(f"[{idx}/{total}] {k_full} 开始：目标≥{min_images} 帧（最多 {recent_days} 天）", "blue")
-            self.log(f"[自动] ({idx}/{total}) {k_full} 目标≥{min_images} 帧，可用日期 {len(dates)} 天（{span}）")
+            self.status(f"[{idx}/{total}] {label} 开始：目标≥{min_images} 帧（最多 {recent_days} 天）", "blue")
+            self.log(f"[自动] ({idx}/{total}) {label} 目标≥{min_images} 帧，可用日期 {len(dates)} 天（{span}）")
             qualified, stop = [], False
             downloaded = rejected = 0
             for date in dates:
                 if stop:
                     break
                 self._checkpoint()
-                region_url = self.config.build_url(system_upper, date, k_number)
+                region_url = self.config.build_url(target_sys, date, k_number)
                 fits_files = self._scan_region_url(region_url)
                 candidates = self._select_candidates(fits_files, k_full)
                 if not candidates:
-                    self.log(f"[自动] {k_full} {date}：无匹配文件")
+                    self.log(f"[自动] {label} {date}：无匹配文件")
                     continue
-                self.log(f"[自动] {k_full} {date}：候选 {len(candidates)} 个（已下载 {downloaded}，合格 {len(qualified)}）")
+                self.log(f"[自动] {label} {date}：候选 {len(candidates)} 个（已下载 {downloaded}，合格 {len(qualified)}）")
                 for _fn, file_url, _size in candidates:
                     if len(qualified) >= min_images:
                         stop = True
@@ -758,7 +768,7 @@ class TemplateEngine:
                     result = downloader.download_single_file(file_url, self.update_root, self._progress_cb("自动下载"))
                     local = os.path.join(self.update_root, downloader.get_filename_from_url(file_url))
                     if not os.path.exists(local):
-                        self.log(f"[自动] {k_full} 下载失败: {result}")
+                        self.log(f"[自动] {label} 下载失败: {result}")
                         continue
                     downloaded += 1
                     is_bad, reasons = self._quality_of(local)
@@ -768,26 +778,26 @@ class TemplateEngine:
                             shutil.move(local, os.path.join(self.bad_dir, os.path.basename(local)))
                         except Exception:
                             pass
-                        self.log(f"[自动] {k_full} 剔除坏帧 ({'; '.join(reasons)})")
+                        self.log(f"[自动] {label} 剔除坏帧 ({'; '.join(reasons)})")
                         continue
                     if self._save_cropped(local):
                         qualified.append(os.path.join(self.cropped_root, os.path.basename(local)))
-                    self.status(f"[{idx}/{total}] {k_full} 下载 {downloaded} · 合格 {len(qualified)}/{min_images} · 剔除 {rejected}（{date}）",
+                    self.status(f"[{idx}/{total}] {label} 下载 {downloaded} · 合格 {len(qualified)}/{min_images} · 剔除 {rejected}（{date}）",
                                 "green")
 
-            self.log(f"[自动] {k_full} 汇总：下载 {downloaded}，合格 {len(qualified)}，剔除 {rejected}")
+            self.log(f"[自动] {label} 汇总：下载 {downloaded}，合格 {len(qualified)}，剔除 {rejected}")
             if not qualified:
-                self.status(f"[{idx}/{total}] {k_full} 没有合格帧，跳过。", "red")
+                self.status(f"[{idx}/{total}] {label} 没有合格帧，跳过。", "red")
                 continue
             if len(qualified) < min_images:
-                self.log(f"[自动] {k_full} 日期用尽，合格 {len(qualified)}<{min_images}，仍生成。")
+                self.log(f"[自动] {label} 日期用尽，合格 {len(qualified)}<{min_images}，仍生成。")
 
-            self.status(f"[{idx}/{total}] {k_full} 生成模板（{len(qualified)} 帧）...", "blue")
+            self.status(f"[{idx}/{total}] {label} 生成模板（{len(qualified)} 帧）...", "blue")
             try:
                 if self._write_template(field_name, qualified):
                     made += 1
             except Exception as e:
-                self.log(f"[自动] {k_full} 生成失败: {e}")
+                self.log(f"[自动] {label} 生成失败: {e}")
 
         self.status(f"一键完成：成功生成 {made}/{total} 个模板 -> {os.path.join(self.workspace_root, 'output')}",
                     "green" if made else "orange")
