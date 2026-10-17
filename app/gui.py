@@ -276,7 +276,11 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         self.btn_auto = QPushButton("一键生成（下载→预处理→达标→生成）")
         self.btn_auto.clicked.connect(lambda: self._start_template("auto"))
-        btn_row.addWidget(self.btn_auto)
+        self.btn_pause = QPushButton("暂停")
+        self.btn_pause.clicked.connect(self._toggle_pause)
+        self.btn_pause.setEnabled(False)
+        btn_row.addWidget(self.btn_auto, 1)
+        btn_row.addWidget(self.btn_pause)
         action_layout.addLayout(btn_row)
 
         self.update_status = QLabel("就绪")
@@ -490,6 +494,8 @@ class MainWindow(QMainWindow):
         worker.log_line.connect(self._log)
         worker.finished.connect(self._on_template_finished)
         self.worker = worker
+        self.btn_pause.setEnabled(True)
+        self.btn_pause.setText("暂停")
         worker.start()
 
     # ---------------- check tab ----------------
@@ -782,8 +788,23 @@ class MainWindow(QMainWindow):
         for b in (self.btn_auto, self.check_btn):
             b.setEnabled(enabled)
 
+    def _toggle_pause(self) -> None:
+        w = self.worker
+        if w is None or not w.isRunning():
+            return
+        if w.is_paused():
+            w.resume()
+            self.btn_pause.setText("暂停")
+            self._log("[升级模板] 已继续。")
+        else:
+            w.pause()
+            self.btn_pause.setText("继续")
+            self._log("[升级模板] 已暂停。")
+
     def _on_template_finished(self) -> None:
         self._set_buttons_enabled(True)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("暂停")
         self._log("[升级模板] 任务结束。")
 
     def closeEvent(self, event) -> None:  # noqa: N802

@@ -102,7 +102,8 @@ class TemplateEngine:
 
     def __init__(self, config: AppConfig, settings: UpdateSettings,
                  targets_text: str, workspace_root: str,
-                 log: LogFn = _noop_log, status: StatusFn = _noop_status):
+                 log: LogFn = _noop_log, status: StatusFn = _noop_status,
+                 pause_event=None):
         self.config = config
         self.settings = settings
         self.targets_text = targets_text
@@ -112,8 +113,17 @@ class TemplateEngine:
         self.bad_dir = os.path.join(workspace_root, "bad_img")
         self.log = log
         self.status = status
+        self.pause_event = pause_event or threading.Event()
+        self.pause_event.set()  # set = 运行中；clear = 暂停
 
     # ---------- 通用 ----------
+    def _checkpoint(self) -> None:
+        """暂停检查点：暂停时阻塞，恢复后继续。"""
+        if not self.pause_event.is_set():
+            self.status("[已暂停] 点“继续”恢复", "orange")
+            self.log("[暂停] 任务已暂停")
+            self.pause_event.wait()
+            self.log("[继续] 任务已恢复")
     def _load_targets(self):
         system_name, problems = parse_targets("", self.targets_text)
         if not system_name:
@@ -347,6 +357,7 @@ class TemplateEngine:
                 self.log(f"[模板更新] {system_upper} {date} 未找到包含 {k_full} 的文件（共 {len(fits_files)} 个）")
                 continue
             for j, (filename, file_url, _size) in enumerate(candidates, 1):
+                self._checkpoint()
                 self.log(f"[模板更新] ({idx}/{total}) #{j}/{len(candidates)} 下载 {system_upper} {date} {k_full} -> {filename}")
                 result = downloader.download_single_file(file_url, self.update_root, self._progress_cb("模板更新下载中"))
                 if isinstance(result, str) and result.startswith("跳过已存在文件"):
@@ -401,6 +412,7 @@ class TemplateEngine:
         lock = threading.Lock()
 
         def _process(path: Path):
+            self._checkpoint()
             is_bad, reasons = self._quality_of(str(path))
             if not is_bad:
                 # 合格帧：按 bin 裁掉边缘光学黑，另存到 cropped/<tel>/
@@ -647,6 +659,8 @@ class TemplateEngine:
                 self.log(f"[模板生成] {k_full} 在下载目录中未找到任何FITS文件，跳过。")
                 continue
 
+            self._checkpoint()
+            self.log(f"[模板生成] ({idx}/{total_templates}) {k_full} 使用 {len(fits_files)} 帧")
             self.status(f"模板生成: ({idx}/{total_templates}) {k_full} - 使用 {len(fits_files)} 个文件合成...", "blue")
             used_files = []
             for fpath in fits_files:
@@ -720,38 +734,48 @@ class TemplateEngine:
                 self.status(f"[{idx}/{total}] {k_full} 在索引中无日期，跳过。", "orange")
                 continue
 
+            span = f"{dates[0]}..{dates[-1]}"
             self.status(f"[{idx}/{total}] {k_full} 开始：目标≥{min_images} 帧（最多 {recent_days} 天）", "blue")
+            self.log(f"[自动] ({idx}/{total}) {k_full} 目标≥{min_images} 帧，可用日期 {len(dates)} 天（{span}）")
             qualified, stop = [], False
+            downloaded = rejected = 0
             for date in dates:
                 if stop:
                     break
+                self._checkpoint()
                 region_url = self.config.build_url(system_upper, date, k_number)
                 fits_files = self._scan_region_url(region_url)
                 candidates = self._select_candidates(fits_files, k_full)
                 if not candidates:
                     self.log(f"[自动] {k_full} {date}：无匹配文件")
                     continue
+                self.log(f"[自动] {k_full} {date}：候选 {len(candidates)} 个（已下载 {downloaded}，合格 {len(qualified)}）")
                 for _fn, file_url, _size in candidates:
                     if len(qualified) >= min_images:
                         stop = True
                         break
+                    self._checkpoint()
                     result = downloader.download_single_file(file_url, self.update_root, self._progress_cb("自动下载"))
                     local = os.path.join(self.update_root, downloader.get_filename_from_url(file_url))
                     if not os.path.exists(local):
                         self.log(f"[自动] {k_full} 下载失败: {result}")
                         continue
+                    downloaded += 1
                     is_bad, reasons = self._quality_of(local)
                     if is_bad:
+                        rejected += 1
                         try:
                             shutil.move(local, os.path.join(self.bad_dir, os.path.basename(local)))
                         except Exception:
                             pass
-                        self.log(f"[自动] {k_full} 剔除坏帧 {os.path.basename(local)} ({'; '.join(reasons)})")
+                        self.log(f"[自动] {k_full} 剔除坏帧 ({'; '.join(reasons)})")
                         continue
                     if self._save_cropped(local):
                         qualified.append(os.path.join(self.cropped_root, os.path.basename(local)))
-                    self.status(f"[{idx}/{total}] {k_full} 合格 {len(qualified)}/{min_images}（{date}）", "green")
+                    self.status(f"[{idx}/{total}] {k_full} 下载 {downloaded} · 合格 {len(qualified)}/{min_images} · 剔除 {rejected}（{date}）",
+                                "green")
 
+            self.log(f"[自动] {k_full} 汇总：下载 {downloaded}，合格 {len(qualified)}，剔除 {rejected}")
             if not qualified:
                 self.status(f"[{idx}/{total}] {k_full} 没有合格帧，跳过。", "red")
                 continue

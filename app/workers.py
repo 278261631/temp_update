@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """基于 QThread 的后台任务：天区收集 与 模板更新各步骤。"""
 
+import threading
+
 from PySide6.QtCore import QThread, Signal
 
 from .config import AppConfig
@@ -14,6 +16,17 @@ class _BaseWorker(QThread):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._failed = False
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # set=运行, clear=暂停
+
+    def pause(self) -> None:
+        self.pause_event.clear()
+
+    def resume(self) -> None:
+        self.pause_event.set()
+
+    def is_paused(self) -> bool:
+        return not self.pause_event.is_set()
 
 
 class RegionCollectWorker(_BaseWorker):
@@ -86,6 +99,7 @@ class TemplateWorker(_BaseWorker):
             self.config, self.settings, self.targets_text, self.workspace_root,
             log=lambda m: self.log_line.emit(m),
             status=lambda t, c="black": self.status.emit(t, c),
+            pause_event=self.pause_event,
         )
         try:
             if self.action == "auto":
